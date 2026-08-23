@@ -1,0 +1,73 @@
+{
+  "expo": {
+    "name": "Deen",
+    "slug": "deen-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "deenapp",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0d1120"
+    },
+    
+  "expo": {
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "template": "./web/index.html"
+    }
+  },
+
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.yourname.deenapp",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "We use your location to calculate accurate prayer times.",
+        "NSCameraUsageDescription": "Used for Qibla AR compass direction.",
+        "NSMicrophoneUsageDescription": "Not used."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0d1120"
+      },
+      "package": "com.yourname.deenapp",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "VIBRATE",
+        "RECEIVE_BOOT_COMPLETED",
+        "FOREGROUND_SERVICE",
+        "POST_NOTIFICATIONS",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ]
+    },
+    "plugins": [
+      "expo-font",
+      "expo-location",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#c9a84c",
+          "sounds": [
+            "./assets/adhan.mp3"
+          ]
+        }
+      ],
+      "expo-sensors"
+    ],
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "3cea79ad-5bf3-47ba-8281-6df3c6711ef5"
+      }
+    }
+  }
+}
