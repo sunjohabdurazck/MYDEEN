@@ -1,8 +1,8 @@
 // src/screens/HomeScreen.js — UPDATED with WeatherWidget, ChallengeBanner, RamadanMode
-import React, { useEffect, useRef, useCallback, useState } from 'react';
+import React, { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet,
-  RefreshControl, AppState, Animated,
+  RefreshControl, AppState, Animated, Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
@@ -30,63 +30,119 @@ import { AppBlocker } from '../services/appBlocker';
 
 const PRAYER_NAMES = ['Fajr', 'Dhuhr', 'Asr', 'Maghrib', 'Isha'];
 
+// Même logique de police que dans AppNavigator (system-ui sur le web)
+const font = (name) => (Platform.OS === 'web' ? 'system-ui' : name);
+
+// Valeurs de repli si une couleur du thème est absente
+const FALLBACK_THEME = {
+  bg: '#0d1120',
+  surface: '#1a1f2e',
+  text: '#ffffff',
+  muted: '#8b93a7',
+  gold: '#c9a84c',
+  orange: '#f59e0b',
+  border: 'rgba(255,255,255,0.08)',
+  isDark: true,
+};
+
+// Clé de date (identique à ta logique d'origine, pour rester compatible avec le store)
+const dateKey = (date) => date.toISOString().slice(0, 10);
+
 export default function HomeScreen({ navigation }) {
-  const { theme: T } = useTheme();
+  const themeCtx = useTheme();
+  const T = useMemo(() => ({ ...FALLBACK_THEME, ...(themeCtx?.theme || {}) }), [themeCtx?.theme]);
   const insets = useSafeAreaInsets();
+
   const {
-    timings, nextPrayer, hijri, logs, isLoading,
+    timings, nextPrayer, hijri, logs: rawLogs, isLoading,
     fetchPrayerTimes, refreshNextPrayer, markPrayer, getTodayCount, location, setLocation,
   } = usePrayerStore();
   const { profile, userId } = useAuthStore();
+
+  const logs = rawLogs || {};
   const fadeAnim = useRef(new Animated.Value(0)).current;
+  const isMounted = useRef(true);
+  const isLocating = useRef(false);
 
   const [extrasOpen, setExtrasOpen] = useState(false);
   const [missionsOpen, setMissionsOpen] = useState(true);
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = dateKey(new Date());
   const todayLogs = logs[today] ?? {};
 
+  const missedCount = useMemo(() => getMissedCount(todayLogs), [todayLogs]);
+  const weekLogs = useMemo(() => getLast7DaysLogs(logs), [logs]);
+
+  const getUserId = useCallback(
+    () => (typeof userId === 'function' ? userId() : userId),
+    [userId]
+  );
+
+  const initLocation = useCallback(async () => {
+    if (isLocating.current) return; // évite les appels simultanés
+    isLocating.current = true;
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        // Permission refusée : on charge quand même les horaires par défaut
+        await fetchPrayerTimes?.();
+        return;
+      }
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      const coords = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
+      if (!isMounted.current) return;
+      setLocation?.(coords);
+      await fetchPrayerTimes?.(coords);
+    } catch (e) {
+      console.warn('Location error:', e?.message);
+      try {
+        await fetchPrayerTimes?.();
+      } catch (err) {
+        console.warn('Prayer times error:', err?.message);
+      }
+    } finally {
+      isLocating.current = false;
+    }
+  }, [fetchPrayerTimes, setLocation]);
+
   useEffect(() => {
+    isMounted.current = true;
     initLocation();
-    Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 600,
+      useNativeDriver: Platform.OS !== 'web',
+    }).start();
+    return () => { isMounted.current = false; };
   }, []);
 
   useEffect(() => {
-    const interval = setInterval(refreshNextPrayer, 60_000);
+    const interval = setInterval(() => refreshNextPrayer?.(), 60_000);
     return () => clearInterval(interval);
-  }, []);
+  }, [refreshNextPrayer]);
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', state => {
       if (state === 'active') {
-        refreshNextPrayer();
+        refreshNextPrayer?.();
         if (!timings) initLocation();
       }
     });
-    return () => sub.remove();
-  }, [timings]);
-
-  const initLocation = async () => {
-    try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      const coords = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
-      setLocation(coords);
-      await fetchPrayerTimes(coords);
-    } catch (e) {
-      console.warn('Location error:', e.message);
-      fetchPrayerTimes();
-    }
-  };
+    return () => sub?.remove?.();
+  }, [timings, refreshNextPrayer, initLocation]);
 
   const handleMarkPrayer = useCallback(async (name, status) => {
-    await markPrayer(userId(), name, status);
-  }, [userId]);
+    if (!name) return;
+    try {
+      await markPrayer?.(getUserId(), name, status);
+    } catch (e) {
+      console.warn('Mark prayer error:', e?.message);
+    }
+  }, [markPrayer, getUserId]);
 
   const handleLockMode = async () => {
     try {
-      const { config } = await BehaviorEngine.getStrictness();
+      const { config } = (await BehaviorEngine.getStrictness()) || {};
       await AppBlocker.startBlocking(
         nextPrayer?.name ?? 'Prayer',
         config?.lockMinutes ?? 20,
@@ -98,28 +154,38 @@ export default function HomeScreen({ navigation }) {
     navigation.navigate('Lock', { prayer: nextPrayer?.name });
   };
 
-  const donePrayers = getTodayCount();
+  const donePrayers = typeof getTodayCount === 'function' ? getTodayCount() : 0;
 
   return (
     <Animated.View style={[styles.root, { opacity: fadeAnim, backgroundColor: T.bg }]}>
       <ScrollView
         contentContainerStyle={[styles.scroll, { paddingTop: insets.top + 8 }]}
         refreshControl={
-          <RefreshControl refreshing={isLoading} onRefresh={initLocation} tintColor={T.gold} colors={[T.gold]} />
+          <RefreshControl
+            refreshing={!!isLoading}
+            onRefresh={initLocation}
+            tintColor={T.gold}
+            colors={[T.gold]}
+          />
         }
         showsVerticalScrollIndicator={false}
       >
         {/* HEADER */}
         <View style={styles.header}>
-          <View>
-            {hijri && <Text style={[styles.hijriDate, { color: T.muted }]}>{hijri.formatted}</Text>}
-            <Text style={[styles.greeting, { color: T.text }]}>
+          <View style={styles.headerText}>
+            {!!hijri?.formatted && (
+              <Text style={[styles.hijriDate, { color: T.muted }]}>{hijri.formatted}</Text>
+            )}
+            <Text style={[styles.greeting, { color: T.text }]} numberOfLines={1}>
               {getGreeting()}, {profile?.display_name?.split(' ')[0] ?? 'Muslim'} 👋
             </Text>
           </View>
           <TouchableOpacity
             style={[styles.settingsBtn, { backgroundColor: T.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }]}
             onPress={() => navigation.navigate('Settings')}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel="Settings"
           >
             <Ionicons name="settings-outline" size={22} color={T.muted} />
           </TouchableOpacity>
@@ -145,15 +211,24 @@ export default function HomeScreen({ navigation }) {
 
         {/* DAILY PROGRESS */}
         <View style={styles.section}>
-          <DailyProgressBar done={donePrayers} total={5} streak={profile?.streak_current ?? 0} totalXP={profile?.total_xp ?? 0} />
+          <DailyProgressBar
+            done={donePrayers}
+            total={5}
+            streak={profile?.streak_current ?? 0}
+            totalXP={profile?.total_xp ?? 0}
+          />
         </View>
 
         {/* QUICK ACTIONS */}
         <QuickActions navigation={navigation} />
 
         {/* DAILY MISSIONS (collapsible) */}
-        <TouchableOpacity style={styles.sectionHeaderRow} onPress={() => setMissionsOpen(v => !v)} activeOpacity={0.7}>
-          <Text style={[styles.sectionTitle, { color: T.muted }]}>🎯 Daily Missions</Text>
+        <TouchableOpacity
+          style={styles.sectionHeaderRow}
+          onPress={() => setMissionsOpen(v => !v)}
+          activeOpacity={0.7}
+        >
+          <Text style={[styles.sectionTitle, styles.sectionTitleInline, { color: T.muted }]}>🎯 Daily Missions</Text>
           <Ionicons name={missionsOpen ? 'chevron-up' : 'chevron-down'} size={16} color={T.muted} />
         </TouchableOpacity>
         {missionsOpen && (
@@ -189,14 +264,14 @@ export default function HomeScreen({ navigation }) {
         </View>
 
         {/* MISSED PRAYERS */}
-        {getMissedCount(todayLogs) > 0 && (
+        {missedCount > 0 && (
           <View style={[styles.qadaCard, {
             backgroundColor: T.isDark ? 'rgba(245,158,11,0.08)' : 'rgba(234,88,12,0.08)',
-            borderColor: T.isDark ? 'rgba(245,158,11,0.25)' : 'rgba(234,88,12,0.25)'
+            borderColor: T.isDark ? 'rgba(245,158,11,0.25)' : 'rgba(234,88,12,0.25)',
           }]}>
             <Ionicons name="alert-circle" size={18} color={T.orange} />
             <Text style={[styles.qadaText, { color: T.orange }]}>
-              {getMissedCount(todayLogs)} missed prayer{getMissedCount(todayLogs) > 1 ? 's' : ''} — tap to make Qada
+              {missedCount} missed prayer{missedCount > 1 ? 's' : ''} — tap to make Qada
             </Text>
           </View>
         )}
@@ -206,7 +281,7 @@ export default function HomeScreen({ navigation }) {
           todayLogs={todayLogs}
           yesterdayLogs={logs[getYesterdayString()] ?? {}}
           streak={profile?.streak_current || 0}
-          weekLogs={getLast7DaysLogs(logs)}
+          weekLogs={weekLogs}
         />
 
         {/* EXTRAS (collapsible) */}
@@ -228,13 +303,13 @@ export default function HomeScreen({ navigation }) {
   );
 }
 
+// ── Helpers ───────────────────────────────────────────────────
 function getLast7DaysLogs(logs) {
   const weekLogs = [];
   for (let i = 6; i >= 0; i--) {
     const date = new Date();
     date.setDate(date.getDate() - i);
-    const dateStr = date.toISOString().slice(0, 10);
-    weekLogs.push(logs[dateStr] || {});
+    weekLogs.push(logs?.[dateKey(date)] || {});
   }
   return weekLogs;
 }
@@ -242,7 +317,7 @@ function getLast7DaysLogs(logs) {
 function getYesterdayString() {
   const yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
-  return yesterday.toISOString().slice(0, 10);
+  return dateKey(yesterday);
 }
 
 function getGreeting() {
@@ -253,16 +328,16 @@ function getGreeting() {
 }
 
 function getMissedCount(logs) {
-  return Object.values(logs).filter(s => s === 'missed').length;
+  return Object.values(logs || {}).filter(s => s === 'missed').length;
 }
 
 function isPrayerTimeStarted(timeStr) {
   if (!timeStr) return false;
-  const match = timeStr.match(/^(\d{2}):(\d{2})/);
+  const match = String(timeStr).match(/^(\d{1,2}):(\d{2})/);
   if (!match) return false;
   const now = new Date();
-  const prayerH = parseInt(match[1]);
-  const prayerM = parseInt(match[2]);
+  const prayerH = parseInt(match[1], 10);
+  const prayerM = parseInt(match[2], 10);
   if (now.getHours() > prayerH) return true;
   if (now.getHours() === prayerH && now.getMinutes() >= prayerM) return true;
   return false;
@@ -275,14 +350,17 @@ const styles = StyleSheet.create({
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start',
     paddingHorizontal: 20, marginBottom: 12,
   },
-  hijriDate: { fontSize: 12, fontFamily: 'PlusJakartaSans-Regular', marginBottom: 2 },
-  greeting: { fontSize: 22, fontFamily: 'PlusJakartaSans-SemiBold' },
+  headerText: { flex: 1, paddingRight: 12 },
+  hijriDate: { fontSize: 12, fontFamily: font('PlusJakartaSans-Regular'), marginBottom: 2 },
+  greeting: { fontSize: 22, fontFamily: font('PlusJakartaSans-SemiBold') },
   settingsBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   section: { paddingHorizontal: 16, marginBottom: 12 },
   sectionTitle: {
-    fontSize: 13, fontFamily: 'PlusJakartaSans-SemiBold', letterSpacing: 0.8,
+    fontSize: 13, fontFamily: font('PlusJakartaSans-SemiBold'), letterSpacing: 0.8,
     textTransform: 'uppercase', paddingHorizontal: 20, marginBottom: 8, marginTop: 8,
   },
+  // Dans la ligne repliable, le padding est déjà fourni par sectionHeaderRow
+  sectionTitleInline: { paddingHorizontal: 0, marginBottom: 0, marginTop: 0 },
   sectionHeaderRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 20, marginTop: 8, marginBottom: 8,
@@ -292,8 +370,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 10,
     margin: 16, padding: 14, borderRadius: 14, borderWidth: 1,
   },
-  qadaText: { fontSize: 14, fontFamily: 'PlusJakartaSans-Medium', flex: 1 },
+  qadaText: { fontSize: 14, fontFamily: font('PlusJakartaSans-Medium'), flex: 1 },
   extrasToggle: { alignItems: 'center', marginVertical: 10, paddingHorizontal: 16 },
   extrasToggleInner: { paddingHorizontal: 22, paddingVertical: 9, borderRadius: 22, borderWidth: 1 },
-  extrasToggleText: { fontSize: 13, fontFamily: 'PlusJakartaSans-Medium' },
+  extrasToggleText: { fontSize: 13, fontFamily: font('PlusJakartaSans-Medium') },
 });
