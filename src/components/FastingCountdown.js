@@ -1,63 +1,127 @@
-// src/components/FastingCountdown.js — only visible during Ramadan
-import React, { useState, useEffect } from 'react';
+// src/components/FastingCountdown.js — visible uniquement pendant le Ramadan
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useTheme } from '../contexts/ThemeContext';
 import { isRamadan } from '../utils/dateUtils';
 
+const DEFAULT_SUHOOR_MIN = 4 * 60 + 30; // 04:30
+const DEFAULT_IFTAR_MIN = 17 * 60 + 48; // 17:48
+const DAY_SEC = 86400;
+
+// Appel sécurisé : ne plante jamais, même si isRamadan() lève une erreur
+const safeIsRamadan = () => {
+  try {
+    return Boolean(isRamadan());
+  } catch (e) {
+    return false;
+  }
+};
+
+// Accepte "04:35", "4:35", "04:35 (BST)", "5:48 PM"... sinon renvoie le fallback
+const parseTime = (t, fallback) => {
+  if (typeof t !== 'string') return fallback;
+  const match = t.match(/(\d{1,2})\s*:\s*(\d{2})\s*(AM|PM)?/i);
+  if (!match) return fallback;
+
+  let h = Number(match[1]);
+  const m = Number(match[2]);
+  const meridiem = match[3] ? match[3].toUpperCase() : null;
+
+  if (meridiem === 'PM' && h < 12) h += 12;
+  if (meridiem === 'AM' && h === 12) h = 0;
+  if (!Number.isFinite(h) || !Number.isFinite(m) || h > 23 || m > 59) return fallback;
+
+  return h * 60 + m;
+};
+
+const pad = (n) => String(n).padStart(2, '0');
+
+const formatDuration = (totalSec) => {
+  const safe = Math.max(0, Math.floor(totalSec));
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const s = safe % 60;
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+};
+
+// Fonction pure : facile à tester, aucun setState dedans
+const computeCountdown = (suhoorTime, iftarTime, now = new Date()) => {
+  let sMin = parseTime(suhoorTime, DEFAULT_SUHOOR_MIN);
+  let iMin = parseTime(iftarTime, DEFAULT_IFTAR_MIN);
+
+  // Données incohérentes (suhoor après iftar) → valeurs par défaut
+  if (sMin >= iMin) {
+    sMin = DEFAULT_SUHOOR_MIN;
+    iMin = DEFAULT_IFTAR_MIN;
+  }
+
+  const nowSec = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+  const sSec = sMin * 60;
+  const iSec = iMin * 60;
+
+  let targetSec;
+  let label;
+  if (nowSec < sSec) {
+    targetSec = sSec;
+    label = '🌙 Suhoor ends in';
+  } else if (nowSec < iSec) {
+    targetSec = iSec;
+    label = '🍽️ Iftar in';
+  } else {
+    targetSec = sSec + DAY_SEC; // suhoor du lendemain
+    label = '🌙 Suhoor ends in';
+  }
+
+  return { label, timeLeft: formatDuration(targetSec - nowSec) };
+};
+
 export default function FastingCountdown({ suhoorTime, iftarTime }) {
-  const { theme: T } = useTheme();
-  const [timeLeft, setTimeLeft] = useState('');
-  const [label, setLabel] = useState('');
+  const themeCtx = useTheme();
+  const T = (themeCtx && themeCtx.theme) || {};
+  const isDark = Boolean(T.isDark);
 
-  const computeCountdown = () => {
-    if (!suhoorTime && !iftarTime) return;
-    const now = new Date();
-    const nowMin = now.getHours() * 60 + now.getMinutes();
+  const [ramadan, setRamadan] = useState(safeIsRamadan);
+  const [countdown, setCountdown] = useState(() => computeCountdown(suhoorTime, iftarTime));
+  const mountedRef = useRef(true);
 
-    // Parse times
-    const parse = (t) => {
-      if (!t) return null;
-      const [h, m] = t.split(':').map(Number);
-      return h * 60 + m;
-    };
-    const sMin = parse(suhoorTime) ?? 270;  // default 4:30 AM
-    const iMin = parse(iftarTime)  ?? 1068; // default 17:48
-
-    let targetMin, lbl;
-    if (nowMin < sMin) {
-      targetMin = sMin;
-      lbl = '🌙 Suhoor ends in';
-    } else if (nowMin < iMin) {
-      targetMin = iMin;
-      lbl = '🍽️ Iftar in';
-    } else {
-      targetMin = sMin + 1440; // next day suhoor
-      lbl = '🌙 Suhoor ends in';
+  const tick = useCallback(() => {
+    if (!mountedRef.current) return;
+    try {
+      setRamadan(safeIsRamadan());
+      setCountdown(computeCountdown(suhoorTime, iftarTime));
+    } catch (e) {
+      // on garde l'ancien affichage plutôt que de planter
     }
-
-    let diff = (targetMin - nowMin) * 60 - now.getSeconds();
-    if (diff < 0) diff += 86400;
-
-    const h = Math.floor(diff / 3600);
-    const m = Math.floor((diff % 3600) / 60);
-    const s = diff % 60;
-    setLabel(lbl);
-    setTimeLeft(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`);
-  };
-
-  useEffect(() => {
-    if (!isRamadan()) return;
-    computeCountdown();
-    const timer = setInterval(computeCountdown, 1000);
-    return () => clearInterval(timer);
   }, [suhoorTime, iftarTime]);
 
-  if (!isRamadan()) return null;
+  useEffect(() => {
+    mountedRef.current = true;
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => {
+      mountedRef.current = false;
+      clearInterval(timer);
+    };
+  }, [tick]);
+
+  if (!ramadan) return null;
 
   return (
-    <View style={[styles.container, { backgroundColor: T.isDark ? '#0d2a1c' : '#f0fdf4', borderColor: '#2d6a4f' }]}>
-      <Text style={[styles.label, { color: T.muted }]}>{label || '🌙 Fasting'}</Text>
-      <Text style={[styles.time, { color: '#10b981' }]}>{timeLeft || '--:--:--'}</Text>
+    <View
+      style={[
+        styles.container,
+        { backgroundColor: isDark ? '#0d2a1c' : '#f0fdf4', borderColor: '#2d6a4f' },
+      ]}
+      accessible
+      accessibilityRole="timer"
+      accessibilityLabel={`${countdown.label} ${countdown.timeLeft}`}
+    >
+      <Text style={[styles.label, { color: T.muted || '#6b7280' }]}>
+        {countdown.label || '🌙 Fasting'}
+      </Text>
+      <Text style={[styles.time, { color: '#10b981' }]}>
+        {countdown.timeLeft || '--:--:--'}
+      </Text>
     </View>
   );
 }
@@ -74,5 +138,10 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   label: { fontSize: 13, fontFamily: 'PlusJakartaSans-Medium' },
-  time: { fontSize: 20, fontFamily: 'PlusJakartaSans-Bold', letterSpacing: 1 },
+  time: {
+    fontSize: 20,
+    fontFamily: 'PlusJakartaSans-Bold',
+    letterSpacing: 1,
+    fontVariant: ['tabular-nums'], // chiffres de largeur fixe : pas de tremblement
+  },
 });
