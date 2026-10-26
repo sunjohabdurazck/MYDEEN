@@ -84,11 +84,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 14,
     paddingVertical: 12,
-    gap: 10,
+    gap: 12,
     minHeight: 56,
   },
   iconBox: {
-    width: 32,
+    width: 40,
     height: 32,
     alignItems: 'center',
     justifyContent: 'center',
@@ -97,7 +97,7 @@ const styles = StyleSheet.create({
     fontSize: 26,
   },
   textCol: {
-    flex: 1,
+    flex: 2,
   },
   title: {
     fontSize: 14,
