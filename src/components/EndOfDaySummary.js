@@ -1,29 +1,54 @@
 // src/components/EndOfDaySummary.js
 // ─────────────────────────────────────────────────────────────
-// Shows at Isha time or midnight — summarizes the day
+// Shows at Isha time or after 10 PM — summarizes the day
 // "You prayed 4/5 today • XP earned: +120 • Keep pushing tomorrow"
 // ─────────────────────────────────────────────────────────────
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, Animated, Modal,
+  View, Text, StyleSheet, TouchableOpacity, Animated, Modal, Platform, Pressable,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../contexts/ThemeContext';
 import { useMissionStore } from '../store/missionStore';
 
 const PRAYER_NAMES = ['Fajr', 'Dhuhr', 'Asr', 'Maghrib', 'Isha'];
 
+// Même logique de police que dans le reste du projet (system-ui sur le web)
+const font = (name) => (Platform.OS === 'web' ? 'system-ui' : name);
+
+// Le driver natif n'existe pas sur le web
+const USE_NATIVE = Platform.OS !== 'web';
+
+// Valeurs de repli si une couleur du thème est absente
+const FALLBACK_THEME = {
+  text: '#ffffff',
+  muted: '#8b93a7',
+  isDark: true,
+};
+
+// Jour local (et non UTC) : sert à ne montrer le résumé qu'une fois par jour
+const getDayKey = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+};
+
+// Mémorisé tant que l'app est ouverte : si l'écran est recréé (navigation),
+// le résumé ne réapparaît pas après avoir été fermé.
+let dismissedDay = null;
+
 function getPrayedCount(logs) {
+  if (!logs || typeof logs !== 'object') return 0;
   return PRAYER_NAMES.filter(p => logs[p] === 'prayed' || logs[p] === 'prayed_late').length;
 }
 
 function getIshaTime(timings) {
-  if (!timings?.Isha) return null;
-  const match = timings.Isha.match(/^(\d{2}):(\d{2})/);
+  const raw = timings?.Isha;
+  if (!raw) return null;
+  const match = String(raw).match(/^(\d{1,2}):(\d{2})/);
   if (!match) return null;
-  const now = new Date();
-  const t = new Date(now);
-  t.setHours(parseInt(match[1]), parseInt(match[2]), 0, 0);
+  const t = new Date();
+  t.setHours(parseInt(match[1], 10), parseInt(match[2], 10), 0, 0);
   return t;
 }
 
@@ -36,76 +61,125 @@ function shouldShowSummary(timings) {
   return false;
 }
 
-export default function EndOfDaySummary({ todayLogs = {}, timings, totalPrayerXP = 0 }) {
-  const { theme: T } = useTheme();
-  const { getTodayMissionXP } = useMissionStore();
+function getMessage(prayedCount) {
+  if (prayedCount === 5) return { text: "Masha'Allah — perfect day! 🌟", color: '#10b981' };
+  if (prayedCount >= 4) return { text: 'Almost perfect — great effort! 💪', color: '#c9a84c' };
+  if (prayedCount >= 2) return { text: 'Keep pushing tomorrow 🌅', color: '#f59e0b' };
+  if (prayedCount === 0) return { text: "Tomorrow is a new start — don't give up ❤️", color: '#9ca3af' };
+  return { text: 'Every prayer counts — stay consistent 🤲', color: '#f59e0b' };
+}
+
+export default function EndOfDaySummary({ todayLogs, timings, totalPrayerXP = 0 }) {
+  const themeCtx = useTheme();
+  const T = useMemo(() => ({ ...FALLBACK_THEME, ...(themeCtx?.theme || {}) }), [themeCtx?.theme]);
+  const insets = useSafeAreaInsets();
+  const missionStore = useMissionStore();
+
   const [visible, setVisible] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
   const slideAnim = useRef(new Animated.Value(60)).current;
   const opacityAnim = useRef(new Animated.Value(0)).current;
+  const isMounted = useRef(true);
+  const isClosing = useRef(false);
 
-  const prayedCount = getPrayedCount(todayLogs);
-  const missionXP = getTodayMissionXP();
-  const totalXP = totalPrayerXP + missionXP;
+  const logs = todayLogs && typeof todayLogs === 'object' ? todayLogs : {};
+  const prayedCount = getPrayedCount(logs);
+
+  // XP des missions : protégé si le store ou la fonction est absent(e)
+  let missionXP = 0;
+  try {
+    missionXP = Number(missionStore?.getTodayMissionXP?.()) || 0;
+  } catch (e) {
+    missionXP = 0;
+  }
+  const totalXP = Math.max(0, Math.round((Number(totalPrayerXP) || 0) + missionXP));
+
   const isPerfect = prayedCount === 5;
   const isMissed = prayedCount === 0;
+  const msg = useMemo(() => getMessage(prayedCount), [prayedCount]);
 
-  const getMessage = () => {
-    if (isPerfect) return { text: "Masha'Allah — perfect day! 🌟", color: '#10b981' };
-    if (prayedCount >= 4) return { text: 'Almost perfect — great effort! 💪', color: '#c9a84c' };
-    if (prayedCount >= 2) return { text: 'Keep pushing tomorrow 🌅', color: '#f59e0b' };
-    if (isMissed) return { text: "Tomorrow is a new start — don't give up ❤️", color: '#9ca3af' };
-    return { text: 'Every prayer counts — stay consistent 🤲', color: '#f59e0b' };
-  };
+  const dividerColor = T.isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.07)';
+  const emptyDotColor = T.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)';
 
-  const msg = getMessage();
+  useEffect(() => {
+    isMounted.current = true;
+    return () => { isMounted.current = false; };
+  }, []);
 
   // Check once a minute if we should show
   useEffect(() => {
-    if (dismissed) return;
     const check = () => {
-      if (shouldShowSummary(timings) && !dismissed) {
-        setVisible(true);
-      }
+      if (dismissedDay === getDayKey()) return;
+      if (isClosing.current) return;
+      if (shouldShowSummary(timings)) setVisible(true);
     };
     check();
     const interval = setInterval(check, 60_000);
     return () => clearInterval(interval);
-  }, [timings, dismissed]);
+  }, [timings]);
 
+  // Animation d'entrée
   useEffect(() => {
-    if (visible) {
-      Animated.parallel([
-        Animated.spring(slideAnim, { toValue: 0, tension: 70, friction: 12, useNativeDriver: true }),
-        Animated.timing(opacityAnim, { toValue: 1, duration: 300, useNativeDriver: true }),
-      ]).start();
-    }
-  }, [visible]);
+    if (!visible) return undefined;
+    slideAnim.setValue(60);
+    opacityAnim.setValue(0);
+    const anim = Animated.parallel([
+      Animated.spring(slideAnim, { toValue: 0, tension: 70, friction: 12, useNativeDriver: USE_NATIVE }),
+      Animated.timing(opacityAnim, { toValue: 1, duration: 300, useNativeDriver: USE_NATIVE }),
+    ]);
+    anim.start();
+    return () => anim.stop();
+  }, [visible, slideAnim, opacityAnim]);
 
-  const handleDismiss = () => {
+  const handleDismiss = useCallback(() => {
+    if (isClosing.current) return; // évite un double appui
+    isClosing.current = true;
+    dismissedDay = getDayKey(); // mémorisé tout de suite, même si l'animation est interrompue
+
     Animated.parallel([
-      Animated.timing(slideAnim, { toValue: 60, duration: 250, useNativeDriver: true }),
-      Animated.timing(opacityAnim, { toValue: 0, duration: 200, useNativeDriver: true }),
+      Animated.timing(slideAnim, { toValue: 60, duration: 250, useNativeDriver: USE_NATIVE }),
+      Animated.timing(opacityAnim, { toValue: 0, duration: 200, useNativeDriver: USE_NATIVE }),
     ]).start(() => {
-      setVisible(false);
-      setDismissed(true);
+      isClosing.current = false;
+      if (isMounted.current) setVisible(false);
     });
-  };
+  }, [slideAnim, opacityAnim]);
 
   if (!visible) return null;
 
   return (
-    <Modal transparent animationType="none" visible={visible} onRequestClose={handleDismiss}>
+    <Modal
+      transparent
+      animationType="none"
+      visible={visible}
+      onRequestClose={handleDismiss}
+      statusBarTranslucent
+    >
       <Animated.View style={[styles.overlay, { opacity: opacityAnim }]}>
-        <Animated.View style={[
-          styles.card,
-          {
-            backgroundColor: T.isDark ? '#111827' : '#FFFFFF',
-            transform: [{ translateY: slideAnim }],
-          },
-        ]}>
+        {/* Toucher en dehors de la carte ferme le résumé */}
+        <Pressable
+          style={StyleSheet.absoluteFill}
+          onPress={handleDismiss}
+          accessibilityLabel="Close summary"
+        />
+
+        <Animated.View
+          style={[
+            styles.card,
+            {
+              backgroundColor: T.isDark ? '#111827' : '#FFFFFF',
+              paddingBottom: 28 + Math.max(insets.bottom, 12),
+              transform: [{ translateY: slideAnim }],
+            },
+          ]}
+        >
           {/* Close */}
-          <TouchableOpacity style={styles.closeBtn} onPress={handleDismiss}>
+          <TouchableOpacity
+            style={styles.closeBtn}
+            onPress={handleDismiss}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityRole="button"
+            accessibilityLabel="Close"
+          >
             <Ionicons name="close" size={18} color={T.muted} />
           </TouchableOpacity>
 
@@ -114,14 +188,14 @@ export default function EndOfDaySummary({ todayLogs = {}, timings, totalPrayerXP
           <Text style={[styles.heading, { color: T.text }]}>Day Summary</Text>
 
           {/* Prayer count */}
-          <View style={[styles.statRow, { borderColor: T.isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.07)' }]}>
+          <View style={[styles.statRow, { borderColor: dividerColor }]}>
             <View style={styles.stat}>
               <Text style={[styles.statValue, { color: isPerfect ? '#10b981' : '#c9a84c' }]}>
                 {prayedCount}/5
               </Text>
               <Text style={[styles.statLabel, { color: T.muted }]}>Prayers</Text>
             </View>
-            <View style={[styles.divider, { backgroundColor: T.isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.07)' }]} />
+            <View style={[styles.divider, { backgroundColor: dividerColor }]} />
             <View style={styles.stat}>
               <Text style={[styles.statValue, { color: '#c9a84c' }]}>+{totalXP}</Text>
               <Text style={[styles.statLabel, { color: T.muted }]}>XP Earned</Text>
@@ -131,15 +205,14 @@ export default function EndOfDaySummary({ todayLogs = {}, timings, totalPrayerXP
           {/* Prayer breakdown */}
           <View style={styles.prayerRow}>
             {PRAYER_NAMES.map(name => {
-              const status = todayLogs[name];
+              const status = logs[name];
               const done = status === 'prayed' || status === 'prayed_late';
               return (
                 <View key={name} style={styles.prayerDot}>
-                  <View style={[
-                    styles.dot,
-                    { backgroundColor: done ? '#10b981' : 'rgba(255,255,255,0.08)' },
-                  ]}>
-                    <Text style={{ fontSize: 10 }}>{done ? '✓' : '·'}</Text>
+                  <View style={[styles.dot, { backgroundColor: done ? '#10b981' : emptyDotColor }]}>
+                    <Text style={[styles.dotText, { color: done ? '#ffffff' : T.muted }]}>
+                      {done ? '✓' : '·'}
+                    </Text>
                   </View>
                   <Text style={[styles.prayerLabel, { color: T.muted }]}>{name[0]}</Text>
                 </View>
@@ -153,6 +226,8 @@ export default function EndOfDaySummary({ todayLogs = {}, timings, totalPrayerXP
           <TouchableOpacity
             style={[styles.doneBtn, { backgroundColor: isPerfect ? '#10b981' : '#c9a84c' }]}
             onPress={handleDismiss}
+            activeOpacity={0.85}
+            accessibilityRole="button"
           >
             <Text style={styles.doneBtnText}>Jazakallah Khair 🤲</Text>
           </TouchableOpacity>
@@ -172,7 +247,6 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
     padding: 28,
-    paddingBottom: 40,
     alignItems: 'center',
   },
   closeBtn: {
@@ -183,7 +257,7 @@ const styles = StyleSheet.create({
   nightIcon: { fontSize: 48, marginBottom: 8 },
   heading: {
     fontSize: 22,
-    fontFamily: 'PlusJakartaSans-SemiBold',
+    fontFamily: font('PlusJakartaSans-SemiBold'),
     marginBottom: 20,
   },
   statRow: {
@@ -200,8 +274,8 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
   },
   divider: { width: 1 },
-  statValue: { fontSize: 28, fontFamily: 'PlusJakartaSans-SemiBold' },
-  statLabel: { fontSize: 11, fontFamily: 'PlusJakartaSans-Regular', marginTop: 2 },
+  statValue: { fontSize: 28, fontFamily: font('PlusJakartaSans-SemiBold') },
+  statLabel: { fontSize: 11, fontFamily: font('PlusJakartaSans-Regular'), marginTop: 2 },
   prayerRow: {
     flexDirection: 'row',
     gap: 16,
@@ -215,10 +289,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  prayerLabel: { fontSize: 9, fontFamily: 'PlusJakartaSans-SemiBold' },
+  dotText: { fontSize: 12, fontWeight: '700' },
+  prayerLabel: { fontSize: 9, fontFamily: font('PlusJakartaSans-SemiBold') },
   message: {
     fontSize: 15,
-    fontFamily: 'PlusJakartaSans-Medium',
+    fontFamily: font('PlusJakartaSans-Medium'),
     textAlign: 'center',
     marginBottom: 24,
     lineHeight: 22,
@@ -233,6 +308,6 @@ const styles = StyleSheet.create({
   doneBtnText: {
     color: '#fff',
     fontSize: 15,
-    fontFamily: 'PlusJakartaSans-SemiBold',
+    fontFamily: font('PlusJakartaSans-SemiBold'),
   },
 });
