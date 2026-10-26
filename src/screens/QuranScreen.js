@@ -1,11 +1,12 @@
 // src/screens/QuranScreen.js — PREMIUM + Khatam Tracker + 99 Names tab
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  TextInput, ActivityIndicator, RefreshControl, ScrollView,
+  TextInput, ActivityIndicator, RefreshControl, ScrollView, Platform,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useQuranStore, useAuthStore } from '../store';
+import { useQuranStore } from '../store';
 import { searchQuran } from '../services/quran';
 import { useTheme } from '../contexts/ThemeContext';
 import JuzTracker from '../components/JuzTracker';
@@ -16,6 +17,33 @@ const QURAN_TABS = [
   { key: 'khatam', label: 'Khatam' },
   { key: 'names',  label: '99 Names' },
 ];
+
+// Même logique de police que dans AppNavigator (system-ui sur le web)
+const font = (name) => (Platform.OS === 'web' ? 'system-ui' : name);
+
+// Valeurs de repli si une couleur du thème est absente
+const FALLBACK_THEME = {
+  bg: '#0d1120',
+  surface: '#1a1f2e',
+  text: '#ffffff',
+  muted: '#8b93a7',
+  gold: '#c9a84c',
+  border: 'rgba(255,255,255,0.08)',
+  isDark: true,
+};
+
+// Ajoute une transparence hexadécimale seulement si la couleur est du type #RRGGBB
+// (évite les couleurs invalides comme "rgba(...)14")
+const withAlpha = (color, alpha) =>
+  typeof color === 'string' && /^#[0-9a-fA-F]{6}$/.test(color) ? color + alpha : color;
+
+// Pourcentage sécurisé (jamais NaN, jamais > 100)
+const getPct = (last, total) => {
+  const l = Number(last) || 0;
+  const t = Number(total) || 0;
+  if (!l || !t) return 0;
+  return Math.min(100, Math.round((l / t) * 100));
+};
 
 // Juz → first Surah+Ayah mapping (standard)
 const JUZ_STARTS = [
@@ -54,14 +82,14 @@ const JUZ_STARTS = [
 // ── Continue Reading Card ─────────────────────────────────────────────────────
 function ContinueReadingCard({ lastRead, progress, onPress, T }) {
   if (!lastRead) return null;
-  const p = progress[lastRead.surahId];
+  const p = progress?.[lastRead.surahId];
   const ayah = p?.lastAyah || lastRead.ayah || 1;
   const total = lastRead.totalVerses || 1;
-  const pct = Math.round((ayah / total) * 100);
+  const pct = getPct(ayah, total);
 
   return (
     <TouchableOpacity
-      style={[styles.continueCard, { backgroundColor: T.gold + '14', borderColor: T.gold + '40' }]}
+      style={[styles.continueCard, { backgroundColor: withAlpha(T.gold, '14'), borderColor: withAlpha(T.gold, '40') }]}
       onPress={onPress}
       activeOpacity={0.85}
     >
@@ -82,25 +110,29 @@ function ContinueReadingCard({ lastRead, progress, onPress, T }) {
 }
 
 // ── Bookmark Strip ─────────────────────────────────────────────────────────────
-function BookmarkStrip({ bookmarks, chapters, onPress, T }) {
-  if (!bookmarks?.length) return null;
+function BookmarkStrip({ bookmarks, chaptersById, onPress, T }) {
+  if (!Array.isArray(bookmarks) || bookmarks.length === 0) return null;
   // Deduplicate by surah
   const seen = new Set();
-  const unique = bookmarks.filter(b => {
-    if (seen.has(b.surah)) return false;
-    seen.add(b.surah);
-    return true;
-  }).slice(0, 5);
+  const unique = bookmarks
+    .filter(b => {
+      if (!b || seen.has(b.surah)) return false;
+      seen.add(b.surah);
+      return true;
+    })
+    .slice(0, 5);
+
+  if (unique.length === 0) return null;
 
   return (
     <View style={styles.bookmarkSection}>
       <Text style={[styles.sectionLabel, { color: T.muted }]}>BOOKMARKS</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled">
         {unique.map((bm, i) => {
-          const ch = chapters.find(c => c.id === bm.surah);
+          const ch = chaptersById.get(Number(bm.surah));
           return (
             <TouchableOpacity
-              key={i}
+              key={`${bm.surah}-${bm.ayah}-${i}`}
               style={[styles.bookmarkChip, { backgroundColor: T.surface, borderColor: T.border }]}
               onPress={() => onPress(bm.surah, ch)}
               activeOpacity={0.8}
@@ -120,32 +152,88 @@ function BookmarkStrip({ bookmarks, chapters, onPress, T }) {
 
 export default function QuranScreen({ navigation }) {
   const [activeTab, setActiveTab] = useState('surahs');
-  const { theme: T } = useTheme();
-  const { chapters, fetchChapters, isLoading, lastRead, progress, bookmarks } = useQuranStore();
+  const themeCtx = useTheme();
+  const T = useMemo(() => ({ ...FALLBACK_THEME, ...(themeCtx?.theme || {}) }), [themeCtx?.theme]);
+  const insets = useSafeAreaInsets();
+
+  const {
+    chapters: rawChapters, fetchChapters, isLoading,
+    lastRead, progress: rawProgress, bookmarks,
+  } = useQuranStore();
+
+  // Protections contre les valeurs absentes
+  const chapters = useMemo(() => (Array.isArray(rawChapters) ? rawChapters : []), [rawChapters]);
+  const progress = rawProgress || {};
+
+  const chaptersById = useMemo(() => {
+    const map = new Map();
+    chapters.forEach(c => { if (c && c.id != null) map.set(Number(c.id), c); });
+    return map;
+  }, [chapters]);
+
   const [searchQuery,   setSearchQuery]   = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching,   setIsSearching]   = useState(false);
   const [refreshing,    setRefreshing]    = useState(false);
 
-  useEffect(() => { fetchChapters('en'); }, []);
+  const isMounted = useRef(true);
+  const debounceRef = useRef(null);
+  const requestId = useRef(0);
 
-  const handleSearch = async (text) => {
-    setSearchQuery(text);
-    if (text.length > 1) {
-      setIsSearching(true);
-      const results = await searchQuran(text);
-      setSearchResults(results.results || []);
-      setIsSearching(false);
-    } else {
-      setSearchResults([]);
+  const isSearchMode = searchQuery.trim().length > 1;
+
+  const loadChapters = useCallback(async () => {
+    try {
+      await fetchChapters?.('en');
+    } catch (e) {
+      console.warn('Chapters error:', e?.message);
     }
-  };
+  }, [fetchChapters]);
 
-  const onRefresh = async () => {
+  useEffect(() => {
+    isMounted.current = true;
+    loadChapters();
+    return () => {
+      isMounted.current = false;
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
+
+  // Recherche avec délai (évite un appel réseau à chaque lettre)
+  // et ignore les réponses plus anciennes que la dernière recherche
+  const handleSearch = useCallback((text) => {
+    setSearchQuery(text);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    const q = text.trim();
+    if (q.length <= 1) {
+      requestId.current += 1;
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+
+    setIsSearching(true);
+    debounceRef.current = setTimeout(async () => {
+      const id = ++requestId.current;
+      try {
+        const res = await searchQuran(q);
+        if (!isMounted.current || id !== requestId.current) return;
+        setSearchResults(Array.isArray(res) ? res : (res?.results || []));
+      } catch (e) {
+        console.warn('Search error:', e?.message);
+        if (isMounted.current && id === requestId.current) setSearchResults([]);
+      } finally {
+        if (isMounted.current && id === requestId.current) setIsSearching(false);
+      }
+    }, 350);
+  }, []);
+
+  const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await fetchChapters('en');
-    setRefreshing(false);
-  };
+    await loadChapters();
+    if (isMounted.current) setRefreshing(false);
+  }, [loadChapters]);
 
   const navigateToSurah = useCallback((surahId, chapter, ayah) => {
     navigation.navigate('Surah', {
@@ -158,10 +246,12 @@ export default function QuranScreen({ navigation }) {
   }, [navigation]);
 
   const renderSurahItem = useCallback(({ item }) => {
-    const isRevealedMakkah = item.revelation_place === 'makkah';
+    if (!item) return null;
+    const place = item.revelation_place || item.revelationPlace;
+    const isRevealedMakkah = place === 'makkah';
     const revColor = isRevealedMakkah ? '#f59e0b' : '#10b981';
     const p = progress[item.id];
-    const pct = p ? Math.round((p.lastAyah / item.versesCount) * 100) : 0;
+    const pct = p ? getPct(p.lastAyah, item.versesCount) : 0;
 
     return (
       <TouchableOpacity
@@ -169,7 +259,7 @@ export default function QuranScreen({ navigation }) {
         onPress={() => navigateToSurah(item.id, item)}
         activeOpacity={0.72}
       >
-        <View style={[styles.surahNumber, { backgroundColor: T.gold + '18' }]}>
+        <View style={[styles.surahNumber, { backgroundColor: withAlpha(T.gold, '18') }]}>
           <Text style={[styles.surahNumberText, { color: T.gold }]}>{item.id}</Text>
         </View>
 
@@ -187,7 +277,7 @@ export default function QuranScreen({ navigation }) {
         <View style={styles.surahRight}>
           <Text style={[styles.translatedName, { color: T.muted }]}>{item.translatedName || ''}</Text>
           {pct > 0 && pct < 100 && (
-            <View style={[styles.progressPill, { backgroundColor: T.gold + '20' }]}>
+            <View style={[styles.progressPill, { backgroundColor: withAlpha(T.gold, '20') }]}>
               <Text style={[styles.progressPillText, { color: T.gold }]}>{pct}%</Text>
             </View>
           )}
@@ -197,25 +287,33 @@ export default function QuranScreen({ navigation }) {
     );
   }, [T, progress, navigateToSurah]);
 
-  const renderSearchResult = useCallback(({ item }) => (
-    <TouchableOpacity
-      style={[styles.searchResultCard, { backgroundColor: T.surface, borderColor: T.border }]}
-      onPress={() => {
-        const ch = chapters.find(c => c.id === item.surah_id);
-        navigateToSurah(item.surah_id, ch);
-      }}
-      activeOpacity={0.8}
-    >
-      <Text style={[styles.searchRef, { color: T.gold }]}>Surah {item.surah_id}:{item.verse_number}</Text>
-      <Text style={[styles.searchArabic, { color: T.text }]} numberOfLines={2}>{item.text_uthmani}</Text>
-      {item.translations?.[0] && (
-        <Text style={[styles.searchTranslation, { color: T.muted }]} numberOfLines={2}>
-          {item.translations[0].text}
-        </Text>
-      )}
-    </TouchableOpacity>
-  ), [T, chapters, navigateToSurah]);
+  const renderSearchResult = useCallback(({ item }) => {
+    if (!item) return null;
+    return (
+      <TouchableOpacity
+        style={[styles.searchResultCard, { backgroundColor: T.surface, borderColor: T.border }]}
+        onPress={() => navigateToSurah(item.surah_id, chaptersById.get(Number(item.surah_id)))}
+        activeOpacity={0.8}
+      >
+        <Text style={[styles.searchRef, { color: T.gold }]}>Surah {item.surah_id}:{item.verse_number}</Text>
+        <Text style={[styles.searchArabic, { color: T.text }]} numberOfLines={2}>{item.text_uthmani}</Text>
+        {item.translations?.[0]?.text ? (
+          <Text style={[styles.searchTranslation, { color: T.muted }]} numberOfLines={2}>
+            {item.translations[0].text}
+          </Text>
+        ) : null}
+      </TouchableOpacity>
+    );
+  }, [T, chaptersById, navigateToSurah]);
 
+  const keyExtractor = useCallback((item, i) => {
+    if (item?.id != null) return String(item.id);
+    if (item?.surah_id != null) return `${item.surah_id}:${item.verse_number}:${i}`;
+    return String(i);
+  }, []);
+
+  // ⚠️ Appelée comme une fonction (et non passée comme composant) :
+  // sinon le champ de recherche se recrée à chaque lettre et le clavier se ferme.
   const renderHeader = () => (
     <>
       {/* Title */}
@@ -236,10 +334,13 @@ export default function QuranScreen({ navigation }) {
           placeholderTextColor={T.muted}
           value={searchQuery}
           onChangeText={handleSearch}
+          autoCorrect={false}
+          autoCapitalize="none"
+          returnKeyType="search"
         />
         {isSearching && <ActivityIndicator size="small" color={T.gold} />}
         {searchQuery.length > 0 && !isSearching && (
-          <TouchableOpacity onPress={() => { setSearchQuery(''); setSearchResults([]); }}>
+          <TouchableOpacity onPress={() => handleSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
             <Ionicons name="close-circle" size={18} color={T.muted} />
           </TouchableOpacity>
         )}
@@ -254,9 +355,13 @@ export default function QuranScreen({ navigation }) {
             T={T}
             onPress={() => {
               if (!lastRead) return;
-              const ch = chapters.find(c => c.id === lastRead.surahId);
+              const ch = chaptersById.get(Number(lastRead.surahId));
               const ayah = progress[lastRead.surahId]?.lastAyah || 1;
-              navigateToSurah(lastRead.surahId, ch || { nameSimple: lastRead.surahName, nameArabic: lastRead.surahNameArabic }, ayah);
+              navigateToSurah(
+                lastRead.surahId,
+                ch || { nameSimple: lastRead.surahName, nameArabic: lastRead.surahNameArabic },
+                ayah
+              );
             }}
           />
         </View>
@@ -266,7 +371,7 @@ export default function QuranScreen({ navigation }) {
       {!searchQuery && (
         <BookmarkStrip
           bookmarks={bookmarks}
-          chapters={chapters}
+          chaptersById={chaptersById}
           T={T}
           onPress={(surahId, ch) => navigateToSurah(surahId, ch)}
         />
@@ -276,15 +381,17 @@ export default function QuranScreen({ navigation }) {
       {!searchQuery && (
         <View style={styles.juzSection}>
           <Text style={[styles.sectionLabel, { color: T.muted }]}>JUMP TO JUZ</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.juzRow}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.juzRow}
+            keyboardShouldPersistTaps="handled"
+          >
             {JUZ_STARTS.map(juz => (
               <TouchableOpacity
                 key={juz.juz}
                 style={[styles.juzChip, { backgroundColor: T.surface, borderColor: T.border }]}
-                onPress={() => {
-                  const ch = chapters.find(c => c.id === juz.surahId);
-                  navigateToSurah(juz.surahId, ch, juz.ayah);
-                }}
+                onPress={() => navigateToSurah(juz.surahId, chaptersById.get(juz.surahId), juz.ayah)}
                 activeOpacity={0.75}
               >
                 <Text style={[styles.juzNum, { color: T.gold }]}>{juz.juz}</Text>
@@ -313,13 +420,20 @@ export default function QuranScreen({ navigation }) {
 
   return (
     <View style={[styles.container, { backgroundColor: T.bg }]}>
-      {/* Tab bar — always visible at top */}
-      <View style={[styles.quranTabRow, { backgroundColor: T.surface, borderBottomColor: T.border }]}>
+      {/* Tab bar — always visible at top (avec la zone sûre pour l'encoche) */}
+      <View
+        style={[
+          styles.quranTabRow,
+          { backgroundColor: T.surface, borderBottomColor: T.border, paddingTop: insets.top },
+        ]}
+      >
         {QURAN_TABS.map(tab => (
           <TouchableOpacity
             key={tab.key}
             style={[styles.quranTabBtn, activeTab === tab.key && { borderBottomColor: T.gold, borderBottomWidth: 2 }]}
             onPress={() => setActiveTab(tab.key)}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: activeTab === tab.key }}
           >
             <Text style={[styles.quranTabText, { color: activeTab === tab.key ? T.gold : T.muted }]}>
               {tab.label}
@@ -344,25 +458,27 @@ export default function QuranScreen({ navigation }) {
 
       {/* Surahs tab */}
       {activeTab === 'surahs' && (
-      <FlatList
-        data={searchQuery.length > 1 ? searchResults : chapters}
-        keyExtractor={(item, i) => item.id?.toString() || i.toString()}
-        renderItem={searchQuery.length > 1 ? renderSearchResult : renderSurahItem}
-        ListHeaderComponent={renderHeader}
-        ListEmptyComponent={
-          <View style={styles.empty}>
-            <Text style={{ fontSize: 40 }}>📖</Text>
-            <Text style={[styles.emptyTitle, { color: T.text }]}>
-              {searchQuery ? 'No results found' : 'Welcome to the Quran'}
-            </Text>
-          </View>
-        }
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={T.gold} />}
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.listContent}
-        initialNumToRender={20}
-        windowSize={10}
-      />
+        <FlatList
+          data={isSearchMode ? searchResults : chapters}
+          keyExtractor={keyExtractor}
+          renderItem={isSearchMode ? renderSearchResult : renderSurahItem}
+          ListHeaderComponent={renderHeader()}
+          ListEmptyComponent={
+            <View style={styles.empty}>
+              <Text style={{ fontSize: 40 }}>📖</Text>
+              <Text style={[styles.emptyTitle, { color: T.text }]}>
+                {isSearching ? 'Searching…' : searchQuery ? 'No results found' : 'Welcome to the Quran'}
+              </Text>
+            </View>
+          }
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={T.gold} colors={[T.gold]} />}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          contentContainerStyle={styles.listContent}
+          initialNumToRender={20}
+          windowSize={10}
+        />
       )}
     </View>
   );
@@ -427,6 +543,7 @@ const styles = StyleSheet.create({
 
   empty:      { alignItems: 'center', paddingVertical: 60, gap: 10 },
   emptyTitle: { fontSize: 18, fontWeight: '700' },
+
   // Quran tabs
   quranTabRow: {
     flexDirection: 'row',
@@ -440,6 +557,6 @@ const styles = StyleSheet.create({
   },
   quranTabText: {
     fontSize: 14,
-    fontFamily: 'PlusJakartaSans-SemiBold',
+    fontFamily: font('PlusJakartaSans-SemiBold'),
   },
 });
