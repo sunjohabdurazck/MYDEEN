@@ -1,7 +1,7 @@
 // src/navigation/AppNavigator.js - Expo SDK 54 Compatible
 import React from 'react';
 import { View, StyleSheet, ActivityIndicator, Platform } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, DefaultTheme, DarkTheme } from '@react-navigation/native';
 // ✅ Use native-stack for Expo (works on web too)
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -83,38 +83,38 @@ function HomeStack() {
         component={RamadanHub}
         options={{ headerShown: false }}
       />
-      <Stack.Screen 
-        name="Qibla"   
-        component={QiblaScreen}   
-        options={{ 
-          presentation: 'modal', 
-          headerShown: true, 
-          title: 'Qibla Direction', 
-          headerStyle: { backgroundColor: T.bg }, 
-          headerTintColor: T.text 
-        }} 
+      <Stack.Screen
+        name="Qibla"
+        component={QiblaScreen}
+        options={{
+          presentation: 'modal',
+          headerShown: true,
+          title: 'Qibla Direction',
+          headerStyle: { backgroundColor: T.bg },
+          headerTintColor: T.text,
+        }}
       />
-      <Stack.Screen 
-        name="Tasbih" 
-        component={TasbihScreen}   
-        options={{ 
-          presentation: 'modal', 
-          headerShown: true, 
-          title: 'Tasbih', 
-          headerStyle: { backgroundColor: T.bg }, 
-          headerTintColor: T.text 
-        }} 
+      <Stack.Screen
+        name="Tasbih"
+        component={TasbihScreen}
+        options={{
+          presentation: 'modal',
+          headerShown: true,
+          title: 'Tasbih',
+          headerStyle: { backgroundColor: T.bg },
+          headerTintColor: T.text,
+        }}
       />
-      <Stack.Screen 
-        name="MosqueFinder" 
-        component={MosqueFinderScreen} 
-        options={{ 
-          presentation: 'modal', 
-          headerShown: true, 
-          title: 'Nearby Mosques', 
-          headerStyle: { backgroundColor: T.bg }, 
-          headerTintColor: T.text 
-        }} 
+      <Stack.Screen
+        name="MosqueFinder"
+        component={MosqueFinderScreen}
+        options={{
+          presentation: 'modal',
+          headerShown: true,
+          title: 'Nearby Mosques',
+          headerStyle: { backgroundColor: T.bg },
+          headerTintColor: T.text,
+        }}
       />
     </Stack.Navigator>
   );
@@ -182,9 +182,14 @@ export default function AppNavigator() {
     );
   }
 
+  // ✅ FIX : on étend le thème par défaut pour garder "fonts" (requis en v7)
+  const baseTheme = theme.isDark ? DarkTheme : DefaultTheme;
+
   const navTheme = {
+    ...baseTheme,
     dark: theme.isDark || false,
     colors: {
+      ...baseTheme.colors,
       background: theme.bg || '#0d1120',
       card: theme.surface || '#1a1f2e',
       text: theme.text || '#ffffff',
@@ -196,10 +201,10 @@ export default function AppNavigator() {
 
   return (
     <NavigationContainer theme={navTheme}>
-      <Stack.Navigator 
-        screenOptions={{ 
-          headerShown: false, 
-          contentStyle: { backgroundColor: theme.bg } 
+      <Stack.Navigator
+        screenOptions={{
+          headerShown: false,
+          contentStyle: { backgroundColor: theme.bg },
         }}
       >
         {!session ? (
@@ -210,26 +215,26 @@ export default function AppNavigator() {
         ) : (
           <>
             <Stack.Screen name="Main" component={MainTabs} />
-            <Stack.Screen 
-              name="Lock" 
-              component={LockScreen} 
-              options={{ presentation: 'modal' }} 
+            <Stack.Screen
+              name="Lock"
+              component={LockScreen}
+              options={{ presentation: 'modal' }}
             />
-            <Stack.Screen 
-              name="Settings" 
-              component={SettingsScreen} 
-              options={{ presentation: 'modal' }} 
+            <Stack.Screen
+              name="Settings"
+              component={SettingsScreen}
+              options={{ presentation: 'modal' }}
             />
-            <Stack.Screen 
-              name="WeeklyReport" 
-              component={WeeklyReportScreen} 
-              options={{ 
-                presentation: 'modal', 
-                headerShown: true, 
+            <Stack.Screen
+              name="WeeklyReport"
+              component={WeeklyReportScreen}
+              options={{
+                presentation: 'modal',
+                headerShown: true,
                 title: 'Discipline Report',
-                headerStyle: { backgroundColor: 'transparent' }, 
-                headerTintColor: '#c9a84c' 
-              }} 
+                headerStyle: { backgroundColor: 'transparent' },
+                headerTintColor: '#c9a84c',
+              }}
             />
           </>
         )}
@@ -239,9 +244,9 @@ export default function AppNavigator() {
 }
 
 const styles = StyleSheet.create({
-  loader: { 
-    flex: 1, 
-    alignItems: 'center', 
-    justifyContent: 'center' 
+  loader: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });
