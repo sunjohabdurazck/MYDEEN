@@ -4,34 +4,78 @@ import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useTheme } from '../contexts/ThemeContext';
 
-export default function ChallengeBanner({ onPress }) {
+const DEFAULT_GRADIENT = ['#c9a84c', '#7a5110'];
+
+export default function ChallengeBanner({
+  onPress,
+  title = 'Daily Challenge',
+  friendsCount = 3,
+  xp = 100,
+  subtitle,
+  disabled = false,
+  style,
+}) {
   const { theme: T } = useTheme();
 
+  const gradient = disabled
+    ? ['#8a8a8a', '#5a5a5a']
+    : T?.challengeGradient || DEFAULT_GRADIENT;
+
+  const sub =
+    subtitle || `Beat ${friendsCount} friends · Earn bonus XP`;
+
   return (
-    <TouchableOpacity onPress={onPress} activeOpacity={0.88} style={styles.wrapper}>
-      <LinearGradient
-        colors={['#c9a84c', '#7a5110']}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 0 }}
-        style={styles.banner}
+    <View style={[styles.shadowWrapper, style]}>
+      <TouchableOpacity
+        onPress={onPress}
+        disabled={disabled}
+        activeOpacity={0.88}
+        accessibilityRole="button"
+        accessibilityState={{ disabled }}
+        accessibilityLabel={`${title}. ${sub}. ${xp} XP`}
+        style={styles.touchable}
       >
-        <Text style={styles.icon}>⚔️</Text>
-        <View style={styles.textCol}>
-          <Text style={styles.title}>Daily Challenge</Text>
-          <Text style={styles.sub}>Beat 3 friends · Earn bonus XP</Text>
-        </View>
-        <View style={styles.pill}>
-          <Text style={styles.pillText}>🏆 100 XP</Text>
-        </View>
-      </LinearGradient>
-    </TouchableOpacity>
+        <LinearGradient
+          colors={gradient}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={styles.banner}
+        >
+          <View style={styles.iconBox}>
+            <Text style={styles.icon}>⚔️</Text>
+          </View>
+
+          <View style={styles.textCol}>
+            <Text style={styles.title} numberOfLines={1}>
+              {title}
+            </Text>
+            <Text style={styles.sub} numberOfLines={1}>
+              {sub}
+            </Text>
+          </View>
+
+          <View style={styles.pill}>
+            <Text style={styles.pillText}>🏆 {xp} XP</Text>
+          </View>
+        </LinearGradient>
+      </TouchableOpacity>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  wrapper: {
+  shadowWrapper: {
     marginHorizontal: 16,
     marginBottom: 10,
+    borderRadius: 16,
+    // Ombre (iOS + Android)
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  touchable: {
     borderRadius: 16,
     overflow: 'hidden',
   },
@@ -41,12 +85,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12,
     gap: 10,
+    minHeight: 56,
   },
-  icon: { fontSize: 26 },
-  textCol: { flex: 1 },
+  iconBox: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  icon: {
+    fontSize: 26,
+  },
+  textCol: {
+    flex: 1,
+  },
   title: {
     fontSize: 14,
-    fontWeight: '800',
     color: '#fff',
     fontFamily: 'PlusJakartaSans-Bold',
   },
@@ -65,6 +119,6 @@ const styles = StyleSheet.create({
   pillText: {
     color: '#fff',
     fontSize: 12,
-    fontWeight: '700',
+    fontFamily: 'PlusJakartaSans-Bold',
   },
 });
