@@ -1,8 +1,20 @@
 // src/components/NamesOfAllah.js
-import React, { useState, useMemo } from 'react';
+//
+// Hardening notes:
+// • Search ignores Arabic tashkeel (diacritics), Latin accents, hyphens,
+//   apostrophes and spaces — so "rahman", "ar rahman", "الرحمن" and "99"-style
+//   number searches all work. The original required exact diacritics for Arabic.
+// • The last row no longer stretches: a 1- or 2-item final row used to render
+//   oversized cards because every card had `flex: 1`.
+// • No FlatList nested in a ScrollView (VirtualizedList warning); 99 small
+//   items are rendered as plain rows.
+// • Arabic text has an explicit lineHeight so diacritics aren't clipped.
+// • Theme colors are validated before alpha suffixes are appended.
+// NOTE: the NAMES data (names, meanings, references) is unchanged from your
+// version — see the review note in my message about verifying it.
+import React, { memo, useCallback, useMemo, useState } from 'react';
 import {
-  View, Text, StyleSheet, TextInput, TouchableOpacity,
-  FlatList, Modal, ScrollView,
+  View, Text, StyleSheet, TextInput, TouchableOpacity, Modal, Keyboard,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../contexts/ThemeContext';
@@ -109,12 +121,71 @@ const NAMES = [
   { id:99, ar:'الصَّبُورُ',   name:'As-Sabur',    meaning:'The Patient',                 ref:'Hadith'},
 ];
 
-function NameCard({ item, theme: T, onPress }) {
+// ── Constants & helpers ───────────────────────────────────────
+const COLUMNS = 3;
+const HEX6 = /^#[0-9a-f]{6}$/i;
+
+const FALLBACK_THEME = {
+  text: '#111827',
+  muted: '#6b7280',
+  gold: '#c9a84c',
+  surface: '#F9F9F6',
+  bg: '#FFFFFF',
+  border: 'rgba(0,0,0,0.08)',
+};
+
+function useSafeTheme() {
+  let ctx;
+  try {
+    ctx = useTheme();
+  } catch (e) {
+    ctx = null;
+  }
+  return { ...FALLBACK_THEME, ...(ctx?.theme || {}) };
+}
+
+function withAlpha(color, alphaHex, fallback) {
+  return typeof color === 'string' && HEX6.test(color) ? `${color}${alphaHex}` : fallback;
+}
+
+/**
+ * Search normalization:
+ * - NFD splits accents/harakat from letters, then the combining marks
+ *   (Latin \u0300–\u036f, Arabic tashkeel \u064B–\u065F, dagger alef \u0670,
+ *   Quranic marks \u06D6–\u06ED, tatweel \u0640) are removed
+ * - alef maksura → ya
+ * - spaces, hyphens and apostrophe-like characters are dropped
+ */
+function normalize(str) {
+  return String(str ?? '')
+    .normalize('NFD')
+    .toLowerCase()
+    .replace(/[\u0300-\u036f\u064B-\u065F\u0670\u06D6-\u06ED\u0640]/g, '')
+    .replace(/\u0649/g, '\u064A')
+    .replace(/[\s'’‘`ʿʾʻ\-_.]/g, '');
+}
+
+// Built once at module load.
+const SEARCH_INDEX = NAMES.map((n) => ({
+  item: n,
+  hay: [normalize(n.name), normalize(n.meaning), normalize(n.ar)],
+}));
+
+function chunk(list, size) {
+  const rows = [];
+  for (let i = 0; i < list.length; i += size) rows.push(list.slice(i, i + size));
+  return rows;
+}
+
+// ── Name card ─────────────────────────────────────────────────
+const NameCard = memo(function NameCard({ item, theme: T, onPress }) {
   return (
     <TouchableOpacity
       style={[styles.card, { backgroundColor: T.card ?? T.bg, borderColor: T.border }]}
       onPress={() => onPress(item)}
       activeOpacity={0.8}
+      accessibilityRole="button"
+      accessibilityLabel={`${item.id}. ${item.name}, ${item.meaning}`}
     >
       <Text style={[styles.number, { color: T.muted }]}>{item.id}</Text>
       <Text style={[styles.arabic, { color: T.gold }]}>{item.ar}</Text>
@@ -122,51 +193,111 @@ function NameCard({ item, theme: T, onPress }) {
       <Text style={[styles.meaning, { color: T.muted }]} numberOfLines={2}>{item.meaning}</Text>
     </TouchableOpacity>
   );
-}
+});
 
-function NameDetailModal({ item, visible, onClose, theme: T }) {
-  if (!item) return null;
+// ── Detail modal ──────────────────────────────────────────────
+function NameDetailModal({ item, onClose, theme: T }) {
+  const hasQuranRef = !!item && !!item.ref && item.ref !== 'Hadith';
+  const isHadith = !!item && item.ref === 'Hadith';
+
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={styles.modalOverlay}>
-        <View style={[styles.modalBox, { backgroundColor: T.surface, borderColor: T.border }]}>
-          <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
-            <Ionicons name="close" size={22} color={T.muted} />
-          </TouchableOpacity>
-          <Text style={[styles.detailNum, { color: T.muted }]}>#{item.id} of 99</Text>
-          <Text style={[styles.detailArabic, { color: T.gold }]}>{item.ar}</Text>
-          <Text style={[styles.detailName, { color: T.text }]}>{item.name}</Text>
-          <Text style={[styles.detailMeaning, { color: T.muted }]}>{item.meaning}</Text>
-          {item.ref && item.ref !== 'Hadith' && (
-            <View style={[styles.refChip, { backgroundColor: T.gold + '18', borderColor: T.gold + '44' }]}>
-              <Text style={[styles.refText, { color: T.gold }]}>📖 Quran {item.ref}</Text>
-            </View>
+    <Modal
+      visible={!!item}
+      transparent
+      animationType="fade"
+      statusBarTranslucent
+      onRequestClose={onClose}
+    >
+      <TouchableOpacity
+        style={styles.modalOverlay}
+        activeOpacity={1}
+        onPress={onClose}
+        accessible={false}
+      >
+        {/* Inner touchable swallows taps so only the dark overlay closes the modal */}
+        <TouchableOpacity
+          activeOpacity={1}
+          style={[styles.modalBox, { backgroundColor: T.surface, borderColor: T.border }]}
+          accessible={false}
+        >
+          {item && (
+            <>
+              <TouchableOpacity
+                style={styles.closeBtn}
+                onPress={onClose}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                accessibilityRole="button"
+                accessibilityLabel="Close"
+              >
+                <Ionicons name="close" size={22} color={T.muted} />
+              </TouchableOpacity>
+
+              <Text style={[styles.detailNum, { color: T.muted }]}>#{item.id} of 99</Text>
+              <Text style={[styles.detailArabic, { color: T.gold }]}>{item.ar}</Text>
+              <Text style={[styles.detailName, { color: T.text }]}>{item.name}</Text>
+              <Text style={[styles.detailMeaning, { color: T.muted }]}>{item.meaning}</Text>
+
+              {hasQuranRef && (
+                <View
+                  style={[
+                    styles.refChip,
+                    {
+                      backgroundColor: withAlpha(T.gold, '18', 'rgba(201,168,76,0.09)'),
+                      borderColor: withAlpha(T.gold, '44', 'rgba(201,168,76,0.27)'),
+                    },
+                  ]}
+                >
+                  <Text style={[styles.refText, { color: T.gold }]}>📖 Quran {item.ref}</Text>
+                </View>
+              )}
+              {isHadith && (
+                <View
+                  style={[
+                    styles.refChip,
+                    {
+                      backgroundColor: withAlpha(T.muted, '18', 'rgba(107,114,128,0.09)'),
+                      borderColor: T.border,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.refText, { color: T.muted }]}>📚 Mentioned in Hadith</Text>
+                </View>
+              )}
+            </>
           )}
-          {item.ref === 'Hadith' && (
-            <View style={[styles.refChip, { backgroundColor: T.muted + '18', borderColor: T.border }]}>
-              <Text style={[styles.refText, { color: T.muted }]}>📚 Mentioned in Hadith</Text>
-            </View>
-          )}
-        </View>
-      </View>
+        </TouchableOpacity>
+      </TouchableOpacity>
     </Modal>
   );
 }
 
-export default function NamesOfAllah() {
-  const { theme: T } = useTheme();
+// ── Main component ────────────────────────────────────────────
+function NamesOfAllah() {
+  const T = useSafeTheme();
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState(null);
 
   const filtered = useMemo(() => {
-    const q = search.toLowerCase();
+    const raw = search.trim();
+    if (!raw) return NAMES;
+    const q = normalize(raw);
     if (!q) return NAMES;
-    return NAMES.filter(n =>
-      n.name.toLowerCase().includes(q) ||
-      n.meaning.toLowerCase().includes(q) ||
-      n.ar.includes(q)
-    );
+    const isNumber = /^\d+$/.test(raw);
+    return SEARCH_INDEX
+      .filter(({ item, hay }) =>
+        (isNumber && String(item.id) === raw) || hay.some((h) => h.includes(q))
+      )
+      .map(({ item }) => item);
   }, [search]);
+
+  const rows = useMemo(() => chunk(filtered, COLUMNS), [filtered]);
+
+  const handleSelect = useCallback((item) => {
+    Keyboard.dismiss();
+    setSelected(item);
+  }, []);
+  const handleClose = useCallback(() => setSelected(null), []);
+  const clearSearch = useCallback(() => setSearch(''), []);
 
   return (
     <View style={[styles.container, { backgroundColor: T.surface, borderColor: T.border }]}>
@@ -177,7 +308,12 @@ export default function NamesOfAllah() {
         </View>
       </View>
 
-      <View style={[styles.searchBar, { backgroundColor: T.inputBg ?? T.bg, borderColor: T.border }]}>
+      <View
+        style={[
+          styles.searchBar,
+          { backgroundColor: T.inputBg ?? T.bg, borderColor: T.border },
+        ]}
+      >
         <Ionicons name="search" size={15} color={T.muted} />
         <TextInput
           placeholder="Search names or meanings..."
@@ -185,35 +321,49 @@ export default function NamesOfAllah() {
           value={search}
           onChangeText={setSearch}
           style={[styles.searchInput, { color: T.text }]}
+          autoCapitalize="none"
+          autoCorrect={false}
+          returnKeyType="search"
+          accessibilityLabel="Search the names of Allah"
         />
         {search ? (
-          <TouchableOpacity onPress={() => setSearch('')}>
+          <TouchableOpacity
+            onPress={clearSearch}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel="Clear search"
+          >
             <Ionicons name="close-circle" size={16} color={T.muted} />
           </TouchableOpacity>
         ) : null}
       </View>
 
-      <FlatList
-        data={filtered}
-        keyExtractor={item => String(item.id)}
-        numColumns={3}
-        scrollEnabled={false}
-        renderItem={({ item }) => (
-          <NameCard item={item} theme={T} onPress={setSelected} />
-        )}
-        contentContainerStyle={styles.grid}
-      />
+      {rows.length === 0 ? (
+        <Text style={[styles.empty, { color: T.muted }]}>No names found.</Text>
+      ) : (
+        <View style={styles.grid}>
+          {rows.map((row, r) => (
+            <View key={r} style={styles.gridRow}>
+              {row.map((item) => (
+                <NameCard key={item.id} item={item} theme={T} onPress={handleSelect} />
+              ))}
+              {/* Invisible fillers keep a short last row at the same card width */}
+              {Array.from({ length: COLUMNS - row.length }, (_, i) => (
+                <View key={`pad-${i}`} style={styles.cardSpacer} />
+              ))}
+            </View>
+          ))}
+        </View>
+      )}
 
-      <NameDetailModal
-        item={selected}
-        visible={!!selected}
-        onClose={() => setSelected(null)}
-        theme={T}
-      />
+      <NameDetailModal item={selected} onClose={handleClose} theme={T} />
     </View>
   );
 }
 
+export default memo(NamesOfAllah);
+
+// ── Styles ────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container: {
     marginHorizontal: 16,
@@ -236,19 +386,26 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     marginBottom: 10,
   },
-  searchInput: { flex: 1, fontSize: 13, fontFamily: 'PlusJakartaSans-Regular' },
+  searchInput: { flex: 1, fontSize: 13, fontFamily: 'PlusJakartaSans-Regular', padding: 0 },
+  empty: {
+    fontSize: 13,
+    fontFamily: 'PlusJakartaSans-Regular',
+    textAlign: 'center',
+    paddingVertical: 24,
+  },
   grid: { gap: 6 },
+  gridRow: { flexDirection: 'row', gap: 6 },
   card: {
     flex: 1,
-    margin: 3,
     borderRadius: 10,
     borderWidth: 1,
     padding: 8,
     alignItems: 'center',
-    minHeight: 80,
+    minHeight: 84,
   },
+  cardSpacer: { flex: 1 },
   number: { fontSize: 9, fontFamily: 'PlusJakartaSans-Regular', marginBottom: 2 },
-  arabic: { fontSize: 16, fontFamily: 'System', marginBottom: 2, textAlign: 'center' },
+  arabic: { fontSize: 16, lineHeight: 28, fontFamily: 'System', marginBottom: 2, textAlign: 'center' },
   latin: { fontSize: 10, fontFamily: 'PlusJakartaSans-SemiBold', textAlign: 'center' },
   meaning: { fontSize: 9, fontFamily: 'PlusJakartaSans-Regular', textAlign: 'center', marginTop: 2 },
   // Modal
@@ -266,11 +423,16 @@ const styles = StyleSheet.create({
     padding: 24,
     alignItems: 'center',
   },
-  closeBtn: { position: 'absolute', top: 14, right: 14 },
+  closeBtn: { position: 'absolute', top: 14, right: 14, zIndex: 1 },
   detailNum: { fontSize: 12, fontFamily: 'PlusJakartaSans-Regular', marginBottom: 8 },
-  detailArabic: { fontSize: 42, fontFamily: 'System', marginBottom: 8 },
+  detailArabic: { fontSize: 42, lineHeight: 70, fontFamily: 'System', marginBottom: 8 },
   detailName: { fontSize: 20, fontFamily: 'PlusJakartaSans-Bold', marginBottom: 4 },
-  detailMeaning: { fontSize: 14, fontFamily: 'PlusJakartaSans-Regular', marginBottom: 12, textAlign: 'center' },
+  detailMeaning: {
+    fontSize: 14,
+    fontFamily: 'PlusJakartaSans-Regular',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
   refChip: {
     paddingHorizontal: 12,
     paddingVertical: 6,
